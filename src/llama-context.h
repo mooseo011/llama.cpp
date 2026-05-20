@@ -245,6 +245,8 @@ public:
     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
 
 private:
+    void layer_streaming_update_window(uint32_t n_tokens);
+
     llm_graph_params graph_params(
                         llm_graph_result * res,
                       const llama_ubatch & ubatch,
@@ -374,4 +376,17 @@ private:
     mutable int32_t n_eval   = 0; // number of eval calls
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
+
+    struct layer_streaming_runtime {
+        bool enabled = false;
+        uint32_t n_window = 1;
+        uint32_t n_prefetch = 1;
+        uint32_t cursor = 0;
+        uint32_t last_begin = 0;
+        uint32_t last_end = 0; // exclusive
+        uint64_t n_window_updates = 0;
+        uint64_t n_prefetch_updates = 0;
+        uint64_t n_decode_tokens = 0;
+        uint64_t t_window_update_us = 0;
+    } layer_stream;
 };

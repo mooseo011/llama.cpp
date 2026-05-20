@@ -700,6 +700,10 @@ struct common_params {
     llama_progress_callback load_progress_callback = NULL;
     void *                  load_progress_callback_user_data = NULL;
     bool no_alloc = false; // Don't allocate model buffers
+    bool low_memory_mode  = false; // aggressive low-memory settings for constrained RAM/VRAM
+    bool layer_streaming  = false; // experimental on-demand repeating-layer streaming during decode
+    uint32_t layer_streaming_window = 1;   // number of resident repeating layers
+    uint32_t layer_streaming_prefetch = 1; // number of layers to prefetch
 };
 
 // call once at the start of a program if it uses libcommon

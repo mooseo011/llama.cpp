@@ -224,9 +224,16 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: causal_attn   = %d\n",   __func__, cparams.causal_attn);
     LLAMA_LOG_INFO("%s: flash_attn    = %s\n",   __func__, llama_flash_attn_type_name(params.flash_attn_type));
     LLAMA_LOG_INFO("%s: kv_unified    = %s\n",   __func__, cparams.kv_unified ? "true" : "false");
+    LLAMA_LOG_INFO("%s: layer_stream  = %s (window=%u, prefetch=%u)\n", __func__,
+        params.layer_streaming ? "true" : "false",
+        params.layer_streaming_window,
+        params.layer_streaming_prefetch);
     LLAMA_LOG_INFO("%s: freq_base     = %.1f\n", __func__, cparams.rope_freq_base);
     LLAMA_LOG_INFO("%s: freq_scale    = %g\n",   __func__, cparams.rope_freq_scale);
     LLAMA_LOG_INFO("%s: n_rs_seq      = %u\n",   __func__, cparams.n_rs_seq);
+    layer_stream.enabled = params.layer_streaming;
+    layer_stream.n_window = params.layer_streaming_window;
+    layer_stream.n_prefetch = params.layer_streaming_prefetch;
 
     if (cparams.n_ctx_seq < hparams.n_ctx_train) {
         LLAMA_LOG_WARN("%s: n_ctx_seq (%u) < n_ctx_train (%u) -- the full capacity of the model will not be utilized\n",
@@ -385,6 +392,56 @@ llama_context::llama_context(
         for (int i = 0; i < n_vocab; ++i) {
             sampling.token_ids_full_vocab[i] = i;
         }
+    }
+}
+
+void llama_context::layer_streaming_update_window(uint32_t n_tokens) {
+    if (!layer_stream.enabled) {
+        return;
+    }
+
+    // stage-2 policy: streaming path is targeted at decode-time single-token progression first
+    if (n_tokens != 1) {
+        return;
+    }
+
+    const int64_t t_start_us = ggml_time_us();
+
+    const uint32_t n_layer = model.hparams.n_layer;
+    if (n_layer == 0) {
+        return;
+    }
+
+    layer_stream.n_decode_tokens += n_tokens;
+
+    // stage-3: advance a logical cursor per decode token to prepare for
+    // demand-loading integration where residency follows per-layer execution.
+    layer_stream.cursor = (layer_stream.cursor + 1) % n_layer;
+
+    const uint32_t begin = layer_stream.cursor;
+    const uint32_t end   = std::min(n_layer, begin + layer_stream.n_window);
+    const uint32_t p_end = std::min(n_layer, end + layer_stream.n_prefetch);
+
+    if (layer_stream.n_window_updates == 0 || begin != layer_stream.last_begin || end != layer_stream.last_end) {
+        LLAMA_LOG_DEBUG("%s: layer-stream window [%u,%u) prefetch [%u,%u)\n", __func__, begin, end, end, p_end);
+        layer_stream.last_begin = begin;
+        layer_stream.last_end   = end;
+        layer_stream.n_window_updates++;
+    }
+
+    if (layer_stream.n_prefetch > 0) {
+        layer_stream.n_prefetch_updates++;
+    }
+
+    layer_stream.t_window_update_us += ggml_time_us() - t_start_us;
+
+    if ((layer_stream.n_decode_tokens % 128) == 0) {
+        LLAMA_LOG_INFO("%s: layer-stream stats: decode_tokens=%" PRIu64 ", window_updates=%" PRIu64 ", prefetch_updates=%" PRIu64 ", update_time=%.3f ms\n",
+                __func__,
+                layer_stream.n_decode_tokens,
+                layer_stream.n_window_updates,
+                layer_stream.n_prefetch_updates,
+                layer_stream.t_window_update_us/1000.0);
     }
 }
 
@@ -1666,6 +1723,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     const uint32_t n_tokens_all  = balloc->get_n_tokens();
     const uint32_t n_outputs_all = balloc->get_n_outputs();
+
+    layer_streaming_update_window(n_tokens_all);
 
     if (output_all) {
         // require that all tokens are output
@@ -3351,6 +3410,9 @@ llama_context_params llama_context_default_params() {
         /*.op_offload                  =*/ true,
         /*.swa_full                    =*/ true,
         /*.kv_unified                  =*/ false,
+        /*.layer_streaming             =*/ false,
+        /*.layer_streaming_window      =*/ 1,
+        /*.layer_streaming_prefetch    =*/ 1,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
     };
@@ -3369,6 +3431,17 @@ llama_context * llama_init_from_model(
     if (params.n_batch == 0 && params.n_ubatch == 0) {
         LLAMA_LOG_ERROR("%s: n_batch and n_ubatch cannot both be zero\n", __func__);
         return nullptr;
+    }
+
+    if (params.layer_streaming) {
+        if (params.n_seq_max != 1) {
+            LLAMA_LOG_ERROR("%s: layer_streaming currently supports n_seq_max == 1 only\n", __func__);
+            return nullptr;
+        }
+        if (params.layer_streaming_window == 0) {
+            LLAMA_LOG_ERROR("%s: layer_streaming_window must be >= 1\n", __func__);
+            return nullptr;
+        }
     }
 
     if (params.n_ctx == 0 && model->hparams.n_ctx_train == 0) {

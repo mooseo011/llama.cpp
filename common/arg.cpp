@@ -2515,6 +2515,41 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
+        {"--low-memory-mode"},
+        "enable aggressive low-memory settings for constrained systems (mmap on, mlock off, KV/op offload off, flash attention off, smaller batch/ubatch)",
+        [](common_params & params) {
+            params.low_memory_mode = true;
+            params.use_mmap        = true;
+            params.use_mlock       = false;
+            params.no_kv_offload   = true;
+            params.no_op_offload   = true;
+            params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+            params.n_batch         = std::min<uint32_t>(params.n_batch, 32);
+            params.n_ubatch        = std::min<uint32_t>(params.n_ubatch, 32);
+        }
+    ));
+    add_opt(common_arg(
+        {"--layer-streaming"},
+        "enable experimental on-demand repeating-layer streaming for decode (single sequence only)",
+        [](common_params & params) {
+            params.layer_streaming = true;
+        }
+    ));
+    add_opt(common_arg(
+        {"--layer-streaming-window"}, "N",
+        "number of resident repeating layers to keep when layer streaming is enabled (default: 1)",
+        [](common_params & params, int value) {
+            params.layer_streaming_window = value > 0 ? (uint32_t) value : 1;
+        }
+    ));
+    add_opt(common_arg(
+        {"--layer-streaming-prefetch"}, "N",
+        "number of layers to prefetch ahead when layer streaming is enabled (default: 1)",
+        [](common_params & params, int value) {
+            params.layer_streaming_prefetch = value >= 0 ? (uint32_t) value : 0;
+        }
+    ));
+    add_opt(common_arg(
         {"--lora"}, "FNAME",
         "path to LoRA adapter (use comma-separated values to load multiple adapters)",
         [](common_params & params, const std::string & value) {
